@@ -5,7 +5,7 @@ import json
 import re
 from config import *
 from log import *
-from robinhood import *
+from alpacaFunctions import *
 from trading_logs import *
 
 
@@ -76,7 +76,15 @@ def make_ai_decisions(buying_power, portfolio_overview, watchlist_overview):
         "**Task:**\n"
         "Analyze the provided portfolio and watchlist data to recommend:\n"
         "1. Stocks to sell, prioritizing those that maximize buying power and profit potential.\n"
-        "2. Stocks to buy that align with available funds and current market conditions.\n\n"
+        "2. Stocks to buy that align with available funds and current market conditions.\n"
+        "3. Consider existing open orders and unrealized P/L when making decisions.\n\n"
+        "**Important Considerations:**\n"
+        "- DO NOT make new orders for stocks that have pending orders (check 'open_orders' field)\n"
+        "- If a stock has a pending BUY order, do not place another buy order\n"
+        "- If a stock has a pending SELL order, do not place another sell order\n"
+        "- Consider unrealized P/L and P/L percentage when deciding to take profits or cut losses\n"
+        "- Current value and unrealized P/L can help determine position sizing\n"
+        "- Pending orders may show $0.00 or small amounts if placed after hours\n\n"
         "**Constraints:**\n"
         f"{chr(10).join(constraints)}"
         "\n\n"
@@ -92,16 +100,19 @@ def make_ai_decisions(buying_power, portfolio_overview, watchlist_overview):
         "Return your decisions in a JSON array with this structure:\n"
         "```json\n"
         "[\n"
-        '  {"symbol": "<symbol>", "decision": "<decision>", "quantity": <quantity>},\n'
+        '  {"symbol": "<symbol>", "decision": "<decision>", "amount": <dollar_amount>},\n'
         "  ...\n"
         "]\n"
         "```\n"
         "- `symbol`: Stock ticker symbol.\n"
         "- `decision`: One of `buy`, `sell`, or `hold`.\n"
-        "- `quantity`: Recommended transaction quantity.\n\n"
+        "- `amount`: Dollar amount to trade (e.g. 500.50 for $500.50).\n\n"
         "**Instructions:**\n"
         "- Provide only the JSON output with no additional text.\n"
-        "- Return an empty array if no actions are necessary."
+        "- Return an empty array if no actions are necessary.\n"
+        "- Specify amounts in USD (e.g. 500.50 for $500.50).\n"
+        "- Fractional shares are supported, so exact dollar amounts can be used.\n"
+        "- IMPORTANT: Skip ANY stock that already has a pending order, regardless of the order amount."
     )
     log_debug(f"AI making-decisions prompt:{chr(10)}{ai_prompt}")
     ai_response = make_ai_request(ai_prompt)
@@ -147,16 +158,18 @@ def make_ai_post_decisions_adjustment(buying_power, trading_results):
         "Return your decisions in a JSON array with this structure:\n"
         "```json\n"
         "[\n"
-        '  {"symbol": "<symbol>", "decision": "<decision>", "quantity": <quantity>},\n'
+        '  {"symbol": "<symbol>", "decision": "<decision>", "amount": <dollar_amount>},\n'
         "  ...\n"
         "]\n"
         "```\n"
         "- `symbol`: Stock ticker symbol.\n"
         "- `decision`: One of `buy`, `sell`, or `hold`.\n"
-        "- `quantity`: Recommended transaction quantity.\n\n"
+        "- `amount`: Dollar amount to trade (e.g. 500.50 for $500.50).\n\n"
         "**Instructions:**\n"
         "- Provide only the JSON output with no additional text.\n"
-        "- Return an empty array if no actions are necessary."
+        "- Return an empty array if no actions are necessary.\n"
+        "- Specify amounts in USD (e.g. 500.50 for $500.50).\n"
+        "- Fractional shares are supported, so exact dollar amounts can be used."
     )
     log_debug(f"AI post-decisions-adjustment prompt:{chr(10)}{ai_prompt}")
     ai_response = make_ai_request(ai_prompt)
@@ -192,13 +205,30 @@ def trading_bot():
     log_info("Getting portfolio stocks...")
     portfolio_stocks = get_portfolio_stocks()
 
-    log_debug(f"Portfolio stocks total: {len(portfolio_stocks)}")
+    # Get and display account information
+    account_info = get_account_info()
+    log_info(f"Account Status:")
+    log_info(f"  Portfolio Value: ${account_info['portfolio_value']:,.2f}")
+    log_info(f"  Buying Power: ${account_info['buying_power']:,.2f}")
+    log_info(f"  Cash: ${account_info['cash']:,.2f}")
+    log_info(f"  Day Trades: {account_info['daytrade_count']}")
+    if account_info['open_orders_count'] > 0:
+        log_info(f"  Open Orders ({account_info['open_orders_count']}):")
+        for symbol, order in account_info['open_orders'].items():
+            log_info(f"    {symbol}: {order['side'].upper()} ${order['notional']:,.2f} - {order['status']}")
 
-    portfolio_stocks_value = 0
-    for stock in portfolio_stocks.values():
-        portfolio_stocks_value += float(stock['price']) * float(stock['quantity'])
-    portfolio = [f"{symbol} ({round(float(stock['price']) * float(stock['quantity']) / portfolio_stocks_value * 100, 2)}%)" for symbol, stock in portfolio_stocks.items()]
-    log_info(f"Portfolio stocks to proceed: {'None' if len(portfolio) == 0 else ', '.join(portfolio)}")
+    # Calculate and display portfolio composition
+    portfolio_value = account_info['portfolio_value']
+    portfolio = []
+    for symbol, stock in portfolio_stocks.items():
+        percentage = (stock['current_value'] / portfolio_value * 100) if portfolio_value > 0 else 0
+        pl_info = f", P/L: ${stock['unrealized_pl']:,.2f} ({stock['unrealized_plpc']:+.2f}%)"
+        order_info = ""
+        if stock['open_orders']:
+            order_info = f" [Order: {stock['open_orders']['side'].upper()} ${stock['open_orders']['notional']:,.2f} - {stock['open_orders']['status']}]"
+        portfolio.append(f"{symbol} ({percentage:.2f}%{pl_info}){order_info}")
+    
+    log_info(f"Portfolio stocks to proceed: {', '.join(portfolio) if portfolio else 'None'}")
 
     log_info("Prepare portfolio stocks for AI analysis...")
     portfolio_overview = {}
@@ -259,58 +289,64 @@ def trading_bot():
         for decision_data in decisions_data:
             symbol = decision_data['symbol']
             decision = decision_data['decision']
-            quantity = decision_data['quantity']
-            log_info(f"{symbol} > Decision: {decision} of {quantity}")
+            amount = decision_data['amount']
+            log_info(f"{symbol} > Decision: {decision} of ${amount:.2f}")
 
             if symbol in TRADE_EXCEPTIONS:
-                trading_results[symbol] = {"symbol": symbol, "quantity": quantity, "decision": decision, "result": "error", "details": "Trade exception"}
+                trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": decision, "result": "error", "details": "Trade exception"}
                 log_warning(f"{symbol} > Decision skipped due to trade exception")
                 continue
 
             if decision == "sell":
                 try:
-                    sell_resp = sell_stock(symbol, quantity)
+                    sell_resp = sell_stock(symbol, amount)
                     if sell_resp and 'id' in sell_resp:
                         if sell_resp['id'] == "demo":
-                            trading_results[symbol] = {"symbol": symbol, "quantity": quantity, "decision": "sell", "result": "success", "details": "Demo mode"}
-                            log_info(f"{symbol} > Demo > Sold {quantity} stocks")
+                            trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": "sell", "result": "success", "details": "Demo mode"}
+                            log_info(f"{symbol} > Demo > Sold ${amount:.2f}")
                         elif sell_resp['id'] == "cancelled":
-                            trading_results[symbol] = {"symbol": symbol, "quantity": quantity, "decision": "sell", "result": "cancelled", "details": "Cancelled by user"}
+                            trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": "sell", "result": "cancelled", "details": "Cancelled by user"}
                             log_info(f"{symbol} > Sell cancelled by user")
                         else:
                             details = extract_sell_response_data(sell_resp)
-                            trading_results[symbol] = {"symbol": symbol, "quantity": quantity, "decision": "sell", "result": "success", "details": details}
-                            log_trade_to_db(symbol, "sell", quantity)
-                            log_info(f"{symbol} > Sold {quantity} stocks")
+                            trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": "sell", "result": "success", "details": details}
+                            log_trade_to_db(symbol, "sell", amount)
+                            log_info(f"{symbol} > Sold ${amount:.2f}")
+                    elif sell_resp and 'error' in sell_resp:
+                        trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": "sell", "result": "error", "details": sell_resp['error']}
+                        log_error(f"{symbol} > Error selling: {sell_resp['error']}")
                     else:
-                        details = sell_resp['detail'] if 'detail' in sell_resp else sell_resp
-                        trading_results[symbol] = {"symbol": symbol, "quantity": quantity, "decision": "sell", "result": "error", "details": details}
+                        details = sell_resp.get('detail', str(sell_resp)) if sell_resp else "Unknown error"
+                        trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": "sell", "result": "error", "details": details}
                         log_error(f"{symbol} > Error selling: {details}")
                 except Exception as e:
-                    trading_results[symbol] = {"symbol": symbol, "quantity": quantity, "decision": "sell", "result": "error", "details": str(e)}
+                    trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": "sell", "result": "error", "details": str(e)}
                     log_error(f"{symbol} > Error selling: {e}")
 
             if decision == "buy":
                 try:
-                    buy_resp = buy_stock(symbol, quantity)
+                    buy_resp = buy_stock(symbol, amount)
                     if buy_resp and 'id' in buy_resp:
                         if buy_resp['id'] == "demo":
-                            trading_results[symbol] = {"symbol": symbol, "quantity": quantity, "decision": "buy", "result": "success", "details": "Demo mode"}
-                            log_info(f"{symbol} > Demo > Bought {quantity} stocks")
+                            trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": "buy", "result": "success", "details": "Demo mode"}
+                            log_info(f"{symbol} > Demo > Bought ${amount:.2f}")
                         elif buy_resp['id'] == "cancelled":
-                            trading_results[symbol] = {"symbol": symbol, "quantity": quantity, "decision": "buy", "result": "cancelled", "details": "Cancelled by user"}
+                            trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": "buy", "result": "cancelled", "details": "Cancelled by user"}
                             log_info(f"{symbol} > Buy cancelled by user")
                         else:
                             details = extract_buy_response_data(buy_resp)
-                            trading_results[symbol] = {"symbol": symbol, "quantity": quantity, "decision": "buy", "result": "success", "details": details}
-                            log_trade_to_db(symbol, "buy", quantity)
-                            log_info(f"{symbol} > Bought {quantity} stocks")
+                            trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": "buy", "result": "success", "details": details}
+                            log_trade_to_db(symbol, "buy", amount)
+                            log_info(f"{symbol} > Bought ${amount:.2f}")
+                    elif buy_resp and 'error' in buy_resp:
+                        trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": "buy", "result": "error", "details": buy_resp['error']}
+                        log_error(f"{symbol} > Error buying: {buy_resp['error']}")
                     else:
-                        details = buy_resp['detail'] if 'detail' in buy_resp else buy_resp
-                        trading_results[symbol] = {"symbol": symbol, "quantity": quantity, "decision": "buy", "result": "error", "details": details}
+                        details = buy_resp.get('detail', str(buy_resp)) if buy_resp else "Unknown error"
+                        trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": "buy", "result": "error", "details": details}
                         log_error(f"{symbol} > Error buying: {details}")
                 except Exception as e:
-                    trading_results[symbol] = {"symbol": symbol, "quantity": quantity, "decision": "buy", "result": "error", "details": str(e)}
+                    trading_results[symbol] = {"symbol": symbol, "amount": amount, "decision": "buy", "result": "error", "details": str(e)}
                     log_error(f"{symbol} > Error buying: {e}")
 
         if (MAX_POST_DECISIONS_ADJUSTMENTS is False
@@ -340,8 +376,8 @@ def main():
 
                 trading_results = trading_bot()
 
-                sold_stocks = [f"{result['symbol']} ({result['quantity']})" for result in trading_results.values() if result['decision'] == "sell" and result['result'] == "success"]
-                bought_stocks = [f"{result['symbol']} ({result['quantity']})" for result in trading_results.values() if result['decision'] == "buy" and result['result'] == "success"]
+                sold_stocks = [f"{result['symbol']} ({result['amount']:.2f})" for result in trading_results.values() if result['decision'] == "sell" and result['result'] == "success"]
+                bought_stocks = [f"{result['symbol']} ({result['amount']:.2f})" for result in trading_results.values() if result['decision'] == "buy" and result['result'] == "success"]
                 errors = [f"{result['symbol']} ({result['details']})" for result in trading_results.values() if result['result'] == "error"]
                 log_info(f"Sold: {'None' if len(sold_stocks) == 0 else ', '.join(sold_stocks)}")
                 log_info(f"Bought: {'None' if len(bought_stocks) == 0 else ', '.join(bought_stocks)}")
