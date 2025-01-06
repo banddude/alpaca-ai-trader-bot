@@ -5,12 +5,12 @@ RUN_INTERVAL_SECONDS = 600                  # Trading interval in seconds (if th
 BYPASS_MARKET_HOURS = True                 # Set to True to ignore market hours check
 
 # Alpaca Live Trading Credentials
-ALPACA_LIVE_API_KEY = "AK768M8RWO3W18UGR4TG"                            # Alpaca live trading API key
-ALPACA_LIVE_SECRET_KEY = "ZAqaMDEWDImr1aAFpxkdSyBkQ9HFQ3ofGa6Dq2OP"     # Alpaca live trading secret key
+ALPACA_LIVE_API_KEY = ""                            # Alpaca live trading API key
+ALPACA_LIVE_SECRET_KEY = ""     # Alpaca live trading secret key
 
 # Alpaca Paper Trading Credentials
-ALPACA_PAPER_API_KEY = "PK4V9DP74VL751PZ5GBA"                           # Alpaca paper trading API key
-ALPACA_PAPER_SECRET_KEY = "IVdXF4kk9oigeK0iV6ocCaKAeyQFi22Axn2q2I8F"    # Alpaca paper trading secret key
+ALPACA_PAPER_API_KEY = ""                           # Alpaca paper trading API key
+ALPACA_PAPER_SECRET_KEY = ""    # Alpaca paper trading secret key
 
 # Set the active credentials based on PAPER_TRADING setting
 ALPACA_API_KEY = ALPACA_PAPER_API_KEY if PAPER_TRADING else ALPACA_LIVE_API_KEY
