@@ -33,4 +33,4 @@ PDT_PROTECTION = False                       # Pattern day trader protection (Fa
 # OpenAI config params
 OPENAI_MODEL_NAME = "gpt-4o"           # OpenAI model name
 MAX_POST_DECISIONS_ADJUSTMENTS = False      # Maximum number of adjustments to make (False - disable adjustments)
-OPENAI_API_KEY = "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"  # OpenAI API key
+OPENAI_API_KEY = ""  # OpenAI API key
